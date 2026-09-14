@@ -1,0 +1,4 @@
+node_modules/
+dich-data/
+*.log
+.env
