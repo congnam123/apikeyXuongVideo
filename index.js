@@ -156,8 +156,10 @@ if (process.env.LSNODE_SOCKET) {
     if (!path.isAbsolute(sock) && process.env.LSNODE_ROOT) {
       sock = path.join(process.env.LSNODE_ROOT, sock);   // LiteSpeed ghi tương đối so với root
     }
-    // Xóa socket cặn của lần chạy trước — còn file là listen() die EADDRINUSE
-    try { if (fs.existsSync(sock)) fs.unlinkSync(sock); } catch (e) { console.error('unlink socket cu:', e.message); }
+    // Xóa socket cặn của lần chạy trước. File socket cũ thường do LiteSpeed/root sở hữu
+    // → unlink EACCES là BÌNH THƯỜNG, cứ thử listen (bind đè được thì sống, không thì
+    // mới EADDRINUSE → fallback TCP). KHÔNG in lỗi ra log gây hoang mang.
+    try { if (fs.existsSync(sock)) fs.unlinkSync(sock); } catch (_) {}
     const server = app.listen(sock, () => {
       _listening = true;
       _logLive('UDS ' + sock);
