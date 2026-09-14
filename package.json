@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Poiiky Dich Proxy - cau noi dich phu de Trung->Viet giua app khach va VietAPI (key nam server-side)",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2"
