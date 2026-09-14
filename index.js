@@ -93,7 +93,16 @@ function _forward(jsonBody) {
   });
 }
 
-// ═══ Express app (Hostinger nhận diện framework qua Express) ═══
+// DEBUG (tạm, 15/09/2026): Hostinger không truyền cổng qua 5 biến PaaS phổ biến → liệt kê TÊN
+// biến env hệ thống cấp để tìm cổng đúng. CHỈ in tên (không in giá trị → không lộ VIETAPI_KEY).
+try {
+  const _ten = Object.keys(process.env).sort();
+  console.log('[env-debug] bien he thong:', _ten.filter(k => !/KEY|SECRET|TOKEN|PASS/i.test(k)).join(','));
+  for (const k of ['PORT','APP_PORT','SERVER_PORT','HTTP_PORT','DICH_PORT']) {
+    const v = process.env[k];
+    console.log('[env-debug]', k, '=', v === undefined ? '(khong co)' : (/^\d+$/.test(String(v)) ? v : '(khong phai so)'));
+  }
+} catch (_) {}
 const app = express();
 app.disable('x-powered-by');
 // trần 2MB khớp hành vi http-server cũ (body quá lớn → 413/400 thay vì nuốt chửng RAM)
