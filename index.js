@@ -21,9 +21,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 const CFG = {
-  // Hostinger/Ploi Node app TỰ gán cổng qua env PORT (đã có reverse-proxy sẵn) → ưu tiên PORT,
-  // fallback DICH_PORT cho chạy tay/VPS (mặc định 8788). KHÔNG hardcode cổng — host mỗi nơi khác nhau.
-  port: parseInt(process.env.PORT || process.env.DICH_PORT || '8788'),
+  // Hostinger/Ploi Node app TỰ gán cổng qua env (đã có reverse-proxy sẵn) → ưu tiên các biến
+  // cổng phổ biến của PaaS, fallback DICH_PORT cho chạy tay/VPS (mặc định 8788).
+  // KHÔNG hardcode cổng — host mỗi nơi khác nhau.
+  port: parseInt(process.env.PORT || process.env.APP_PORT || process.env.SERVER_PORT
+    || process.env.HTTP_PORT || process.env.DICH_PORT || '8788'),
   upstream: process.env.VIETAPI_UPSTREAM || 'https://api.vietapi.tech/v1/chat/completions',
   key: process.env.VIETAPI_KEY || '',                       // BẮT BUỘC đặt bằng env — KHÔNG hardcode
   model: process.env.DICH_MODEL || 'gpt-5.6-luna',
