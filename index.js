@@ -93,16 +93,7 @@ function _forward(jsonBody) {
   });
 }
 
-// DEBUG (tạm, 15/09/2026): Hostinger không truyền cổng qua 5 biến PaaS phổ biến → liệt kê TÊN
-// biến env hệ thống cấp để tìm cổng đúng. CHỈ in tên (không in giá trị → không lộ VIETAPI_KEY).
-try {
-  const _ten = Object.keys(process.env).sort();
-  console.log('[env-debug] bien he thong:', _ten.filter(k => !/KEY|SECRET|TOKEN|PASS/i.test(k)).join(','));
-  for (const k of ['PORT','APP_PORT','SERVER_PORT','HTTP_PORT','DICH_PORT']) {
-    const v = process.env[k];
-    console.log('[env-debug]', k, '=', v === undefined ? '(khong co)' : (/^\d+$/.test(String(v)) ? v : '(khong phai so)'));
-  }
-} catch (_) {}
+// ═══ Express app (Hostinger nhận diện framework qua Express) ═══
 const app = express();
 app.disable('x-powered-by');
 // trần 2MB khớp hành vi http-server cũ (body quá lớn → 413/400 thay vì nuốt chửng RAM)
@@ -150,4 +141,41 @@ app.post('/v1/chat/completions', async (req, res) => {
 // 404 mặc định cho route còn lại (khớp hành vi cũ)
 app.use((req, res) => res.status(404).json({ error: { message: 'Không có route. thử /health hoặc /v1/chat/completions' } }));
 
-app.listen(CFG.port, () => console.log('Poiiky Dich Proxy :' + CFG.port + ' → ' + CFG.upstream + ' (model ' + CFG.model + ', trần ' + CFG.maxReqNgay + ' req/token/ngày)'));
+// ═══ LISTEN ═══
+// Hostinger (LiteSpeed) KHÔNG cấp cổng TCP qua env — nó đưa UDS qua LSNODE_SOCKET
+// (đo env-debug 15/09/2026 xác nhận: không có PORT nào, chỉ có LSNODE_SOCKET/LSNODE_ROOT).
+// → Ưu tiên listen unix socket; LSNODE_ROOT có thể là tiền tố tương đối của socket path.
+// Fallback TCP (PORT/env/không) cho VPS, Docker, chạy tay.
+let _listening = false;
+const _logLive = (mo) => console.log('Poiiky Dich Proxy ' + mo + ' → ' + CFG.upstream +
+  ' (model ' + CFG.model + ', trần ' + CFG.maxReqNgay + ' req/token/ngày)');
+
+if (process.env.LSNODE_SOCKET) {
+  try {
+    let sock = String(process.env.LSNODE_SOCKET);
+    if (!path.isAbsolute(sock) && process.env.LSNODE_ROOT) {
+      sock = path.join(process.env.LSNODE_ROOT, sock);   // LiteSpeed ghi tương đối so với root
+    }
+    // Xóa socket cặn của lần chạy trước — còn file là listen() die EADDRINUSE
+    try { if (fs.existsSync(sock)) fs.unlinkSync(sock); } catch (e) { console.error('unlink socket cu:', e.message); }
+    const server = app.listen(sock, () => {
+      _listening = true;
+      _logLive('UDS ' + sock);
+      // LiteSpeed chạy cùng user → quyền 0660 an toàn hơn 0777
+      try { fs.chmodSync(sock, 0o660); } catch (_) {}
+    });
+    server.on('error', (e) => {
+      if (_listening) return;   // lỗi sau khi đã live (client đóng socket…) → không fallback chồng
+      console.error('Loi listen UDS (' + e.code + ' ' + e.message + ') → thu TCP cong ' + CFG.port);
+      _listening = true;
+      const fb = app.listen(CFG.port, () => _logLive(':' + CFG.port + ' (fallback)'));
+      fb.on('error', (e2) => console.error('Fallback TCP cung loi (' + e2.code + ') — dung process'));
+    });
+  } catch (e) {
+    console.error('Loi giai ma LSNODE_SOCKET (' + e.message + ') → dung TCP');
+    if (!_listening) { _listening = true; app.listen(CFG.port, () => _logLive(':' + CFG.port)); }
+  }
+} else {
+  _listening = true;
+  app.listen(CFG.port, () => _logLive(':' + CFG.port));
+}
