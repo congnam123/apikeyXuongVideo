@@ -32,6 +32,9 @@ const CFG = {
   maxReqNgay: parseInt(process.env.DICH_MAX_REQ_NGAY || '800'),  // ~40 video/lượt-thiết-bị/ngày (≈20 req/video)
   timeoutMs: parseInt(process.env.DICH_TIMEOUT_MS || '150000'),
   dataDir: process.env.DICH_DATA_DIR || path.join(__dirname, 'dich-data'),
+  licenseCheckUrl: process.env.DICH_LICENSE_CHECK_URL || 'https://poiiky.com/public/api/v1/license-check.php',
+  licenseCacheMs: parseInt(process.env.DICH_LICENSE_CACHE_MS || '300000'),
+  licenseProductId: parseInt(process.env.DICH_LICENSE_PRODUCT_ID || '16'),
 };
 if (!CFG.key) { console.error('Thiếu env VIETAPI_KEY — proxy từ chối chạy.'); process.exit(1); }
 
@@ -73,6 +76,61 @@ const _thongKe = (tk, tokIn, tokOut, ma) => {
   try { fs.appendFileSync(logFile(), line); } catch (e) { console.error('ghi jsonl fail:', e.message); }
 };
 
+// License credential comes only from the desktop C++ shield. It is not trusted by itself: before a
+// request can consume VietAPI quota, validate it with the same license endpoint that activates app.
+const _licenseCache = new Map();
+function _docCredential(token) {
+  try {
+    const raw = Buffer.from(String(token), 'base64url').toString('utf8');
+    const c = JSON.parse(raw);
+    if (!c || typeof c.licenseKey !== 'string' || typeof c.deviceId !== 'string') return null;
+    if (!/^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}$/i.test(c.licenseKey)) return null;
+    if (!/^DEV-[A-Z0-9]{16}$/i.test(c.deviceId)) return null;
+    if (Number(c.productId) !== CFG.licenseProductId) return null;
+    return c;
+  } catch (_) {
+    return null;
+  }
+}
+function _goiLicense(c) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(CFG.licenseCheckUrl);
+    const data = Buffer.from(JSON.stringify({
+      license_key: c.licenseKey, device_id: c.deviceId, product_id: CFG.licenseProductId,
+      tool_version: String(c.toolVersion || ''),
+    }), 'utf8');
+    const mod = u.protocol === 'http:' ? require('http') : https;
+    const r = mod.request({ hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443),
+      path: u.pathname + u.search, method: 'POST', timeout: 12000,
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': data.length } }, (res) => {
+      let txt = ''; res.on('data', (chunk) => txt += chunk);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, data: JSON.parse(txt) }); }
+        catch (_) { reject(new Error('license server trả dữ liệu không hợp lệ')); }
+      });
+    });
+    r.on('error', reject); r.on('timeout', () => r.destroy(new Error('timeout license server')));
+    r.write(data); r.end();
+  });
+}
+async function _xacMinhLicense(token) {
+  const c = _docCredential(token);
+  if (!c) return { ok: false, status: 401, message: 'License credential không hợp lệ. Hãy mở lại app và kích hoạt license.' };
+  const k = _tokenKhoa(token);
+  const cached = _licenseCache.get(k);
+  if (cached && cached.until > Date.now()) return { ok: true, quotaKey: cached.quotaKey };
+  let out;
+  try { out = await _goiLicense(c); }
+  catch (e) { return { ok: false, status: 503, message: 'Không kiểm tra được license: ' + String(e.message).slice(0, 100) }; }
+  if (!out.data || out.data.ok !== true || out.data.valid !== true) {
+    return { ok: false, status: 403, message: (out.data && (out.data.message || out.data.msg)) || 'License đã hết hạn hoặc không đúng thiết bị.' };
+  }
+  // Quota must be stable by license + device, not by the full credential/version string.
+  const quotaKey = _tokenKhoa(c.licenseKey + '|' + c.deviceId);
+  _licenseCache.set(k, { quotaKey, until: Date.now() + Math.max(0, CFG.licenseCacheMs) });
+  return { ok: true, quotaKey };
+}
+
 // ═══ Forward lên VietAPI (khuôn OpenAI-compatible) ═══
 function _forward(jsonBody) {
   return new Promise((resolve, reject) => {
@@ -108,9 +166,11 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const auth = String(req.headers.authorization || '');
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (!token) return res.status(401).json({ error: { message: 'Thiếu device token — app chưa kích hoạt license?' } });
+    if (!token) return res.status(401).json({ error: { message: 'Thiếu license credential — hãy mở lại app đã kích hoạt license.' } });
 
-    const tk = _tokenKhoa(token);
+    const lic = await _xacMinhLicense(token);
+    if (!lic.ok) return res.status(lic.status).json({ error: { message: lic.message } });
+    const tk = lic.quotaKey;
     if ((_dem[tk] || 0) >= CFG.maxReqNgay) {
       return res.status(429).set('Retry-After', '3600')
         .json({ error: { message: 'Vượt trần dịch vụ hôm nay — thử lại sau hoặc dùng Gemini web.' } });
