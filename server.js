@@ -30,7 +30,8 @@ const CFG = {
   key: process.env.VIETAPI_KEY || '',                       // BẮT BUỘC đặt bằng env — KHÔNG hardcode
   model: process.env.DICH_MODEL || 'gpt-5.6-luna',
   maxReqNgay: parseInt(process.env.DICH_MAX_REQ_NGAY || '800'),  // ~40 video/lượt-thiết-bị/ngày (≈20 req/video)
-  timeoutMs: parseInt(process.env.DICH_TIMEOUT_MS || '150000'),
+  timeoutMs: parseInt(process.env.DICH_TIMEOUT_MS || '240000'),   // 240s — đủ cho batch 50 câu AI nặng; Railway/Cloudflare cần cấu hình timeout tương ứng
+  retryUpstream: parseInt(process.env.DICH_RETRY_UPSTREAM || '1'), // retry 1 lần khi upstream timeout/5xx
   dataDir: process.env.DICH_DATA_DIR || path.join(__dirname, 'dich-data'),
   licenseCheckUrl: process.env.DICH_LICENSE_CHECK_URL || 'https://poiiky.com/public/api/v1/license-check.php',
   licenseCacheMs: parseInt(process.env.DICH_LICENSE_CACHE_MS || '300000'),
@@ -140,7 +141,7 @@ async function _xacMinhLicense(token) {
 }
 
 // ═══ Forward lên VietAPI (khuôn OpenAI-compatible) ═══
-function _forward(jsonBody) {
+function _forward1(jsonBody) {
   return new Promise((resolve, reject) => {
     const u = new URL(CFG.upstream);
     const data = Buffer.from(JSON.stringify(jsonBody), 'utf8');
@@ -159,9 +160,43 @@ function _forward(jsonBody) {
   });
 }
 
+// _forward VỚI RETRY: upstream timeout/5xx → chờ 5s rồi thử lại (tối đa CFG.retryUpstream lần).
+// AI model quá tải tạm thời (503/504/timeout) thường hồi sau vài giây → retry 1 lần cứu được batch,
+// tránh fallback sang Google Translate chất lượng kém hơn.
+async function _forward(jsonBody) {
+  const maxRetries = Math.max(0, CFG.retryUpstream || 0);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await _forward1(jsonBody);
+      // 5xx từ upstream (VietAPI quá tải) → retry thay vì trả ngay cho client
+      if (result.status >= 500 && attempt < maxRetries) {
+        console.warn(`[Proxy] upstream trả ${result.status} → retry sau 5s (lần ${attempt + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+      return result;
+    } catch (err) {
+      // Network error / timeout → retry
+      if (attempt < maxRetries) {
+        console.warn(`[Proxy] upstream lỗi: ${err.message} → retry sau 5s (lần ${attempt + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ═══ Express app (Hostinger nhận diện framework qua Express) ═══
 const app = express();
 app.disable('x-powered-by');
+// Request timeout: đảm bảo Express không tự cắt connection trước khi AI trả lời xong.
+// Cộng thêm 30s buffer cho retry + JSON parse. Không ảnh hưởng reverse proxy timeout (cấu hình riêng).
+app.use((req, res, next) => {
+  req.setTimeout(CFG.timeoutMs + 30000);
+  res.setTimeout(CFG.timeoutMs + 30000);
+  next();
+});
 // trần 2MB khớp hành vi http-server cũ (body quá lớn → 413/400 thay vì nuốt chửng RAM)
 app.use(express.json({ limit: '2mb' }));
 
